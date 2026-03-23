@@ -1,10 +1,12 @@
 // -----------------------------------------------------------------------
-// RL Recommendation System — Frontend JavaScript
+// RL Ad Recommendation System — Frontend JavaScript
 // -----------------------------------------------------------------------
 
 let lossChart   = null;
+let ctrChart    = null;
+let roasChart   = null;
 let pollTimer   = null;
-let lastMetrics = null;
+let analyticsLoaded = false;
 
 // -----------------------------------------------------------------------
 // Boot
@@ -25,15 +27,18 @@ function setupTabs() {
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
       document.querySelectorAll('.tab-content').forEach(s => s.classList.remove('active'));
       btn.classList.add('active');
-      document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
-      if (btn.dataset.tab === 'training') updateLossChart();
-      if (btn.dataset.tab === 'metrics')  loadMetrics();
+      const id = 'tab-' + btn.dataset.tab;
+      document.getElementById(id).classList.add('active');
+
+      if (btn.dataset.tab === 'training')    updateLossChart();
+      if (btn.dataset.tab === 'analytics')   loadAnalytics();
+      if (btn.dataset.tab === 'advertisers') loadAdvertisers();
     });
   });
 }
 
 // -----------------------------------------------------------------------
-// Polling for status updates
+// Polling
 // -----------------------------------------------------------------------
 function startPolling() {
   pollStatus();
@@ -45,51 +50,49 @@ async function pollStatus() {
     const res  = await fetch('/api/status');
     const data = await res.json();
 
-    // Dataset stats
+    // KPI bar
     if (data.dataset) {
-      setText('stat-users', fmtNum(data.dataset.n_users));
-      setText('stat-items', fmtNum(data.dataset.n_items));
-      setText('stat-train', fmtNum(data.dataset.n_train));
-      setText('stat-test',  fmtNum(data.dataset.n_test));
+      const d = data.dataset;
+      setText('stat-users',       fmtNum(d.n_users));
+      setText('stat-ads',         fmtNum(d.n_ads));
+      setText('stat-impressions', fmtNum(d.impressions));
+      setText('stat-ctr',         pct(d.ctr));
+      setText('stat-cvr',         pct(d.cvr));
+      setText('stat-ecpm',        '$' + (d.ecpm || 0).toFixed(3));
     }
 
-    // Header badge + training panel
-    const t = data.training;
-    const headerBadge = document.getElementById('status-badge');
-    const trainBadge  = document.getElementById('train-status-text');
+    const t     = data.training;
+    const hBadge = document.getElementById('status-badge');
+    const tBadge = document.getElementById('train-status-text');
 
     if (t.running) {
-      setBadge(headerBadge, 'Training…', 'badge-running');
-      setBadge(trainBadge,  `Epoch ${t.epoch} / ${t.total_epochs}`, 'badge-running');
+      setBadge(hBadge, 'Training…',                'badge-running');
+      setBadge(tBadge, `Epoch ${t.epoch}/${t.total_epochs}`, 'badge-running');
     } else if (t.complete) {
-      setBadge(headerBadge, 'Ready', 'badge-complete');
-      setBadge(trainBadge,  'Complete ✓', 'badge-complete');
-      clearInterval(pollTimer);   // stop polling once done
+      setBadge(hBadge, 'Ready',      'badge-complete');
+      setBadge(tBadge, 'Complete ✓', 'badge-complete');
+      clearInterval(pollTimer);
     } else if (t.error) {
-      setBadge(headerBadge, 'Error', 'badge-error');
-      setBadge(trainBadge,  'Error', 'badge-error');
+      setBadge(hBadge, 'Error', 'badge-error');
+      setBadge(tBadge, 'Error', 'badge-error');
     } else {
-      setBadge(headerBadge, 'Initialising…', 'badge-pending');
-      setBadge(trainBadge,  'Pending', 'badge-pending');
+      setBadge(hBadge, 'Initialising…', 'badge-pending');
+      setBadge(tBadge, 'Pending',       'badge-pending');
     }
 
-    const epoch = t.total_epochs ? `${t.epoch} / ${t.total_epochs}` : '—';
-    setText('train-epoch',   epoch);
+    setText('train-epoch',   t.total_epochs ? `${t.epoch} / ${t.total_epochs}` : '—');
     setText('train-loss',    t.loss    != null ? t.loss.toFixed(5)    : '—');
     setText('train-epsilon', t.epsilon != null ? t.epsilon.toFixed(4) : '1.0');
 
-    const pct = Math.round((t.progress || 0) * 100);
-    document.getElementById('progress-bar').style.width = pct + '%';
-    setText('progress-label', pct + '%');
+    const p = Math.round((t.progress || 0) * 100);
+    document.getElementById('progress-bar').style.width = p + '%';
+    setText('progress-label', p + '%');
 
     updateLossChart();
 
-    if (t.metrics && t.metrics !== lastMetrics) {
-      lastMetrics = t.metrics;
-      renderMetrics(t.metrics);
-    }
+    if (t.metrics) renderMetrics(t.metrics);
 
-  } catch (_) { /* network hiccup – ignore */ }
+  } catch (_) {}
 }
 
 // -----------------------------------------------------------------------
@@ -100,28 +103,23 @@ function initLossChart() {
   lossChart = new Chart(ctx, {
     type: 'line',
     data: {
-      labels:   [],
+      labels: [],
       datasets: [{
-        label:           'Avg Loss per Epoch',
-        data:            [],
-        borderColor:     '#6c63ff',
-        backgroundColor: 'rgba(108,99,255,.12)',
-        borderWidth:     2,
-        fill:            true,
-        tension:         0.4,
-        pointRadius:     5,
-        pointBackgroundColor: '#6c63ff',
+        label: 'Avg Huber Loss',
+        data: [],
+        borderColor: '#7c6dfa',
+        backgroundColor: 'rgba(124,109,250,.1)',
+        borderWidth: 2, fill: true, tension: 0.4,
+        pointRadius: 4, pointBackgroundColor: '#7c6dfa',
       }],
     },
     options: {
       responsive: true,
-      animation:  { duration: 300 },
-      plugins: {
-        legend: { labels: { color: '#8888aa' } },
-      },
+      animation: { duration: 300 },
+      plugins: { legend: { labels: { color: '#7878a0' } } },
       scales: {
-        x: { ticks: { color: '#8888aa' }, grid: { color: '#2a2a4a' } },
-        y: { ticks: { color: '#8888aa' }, grid: { color: '#2a2a4a' }, beginAtZero: false },
+        x: { ticks: { color: '#7878a0' }, grid: { color: '#2a2a4a' } },
+        y: { ticks: { color: '#7878a0' }, grid: { color: '#2a2a4a' } },
       },
     },
   });
@@ -132,15 +130,15 @@ async function updateLossChart() {
   try {
     const res  = await fetch('/api/training_history');
     const data = await res.json();
-    if (!data.losses || data.losses.length === 0) return;
-    lossChart.data.labels                    = data.losses.map((_, i) => `Ep ${i + 1}`);
-    lossChart.data.datasets[0].data         = data.losses;
+    if (!data.losses || !data.losses.length) return;
+    lossChart.data.labels                = data.losses.map((_, i) => `Ep ${i+1}`);
+    lossChart.data.datasets[0].data     = data.losses;
     lossChart.update('none');
   } catch (_) {}
 }
 
 // -----------------------------------------------------------------------
-// Demo — load user list
+// Demo — users
 // -----------------------------------------------------------------------
 async function loadUsers() {
   try {
@@ -149,98 +147,330 @@ async function loadUsers() {
     const sel  = document.getElementById('user-select');
     sel.innerHTML = '<option value="">— Select a user —</option>';
     (data.users || []).forEach(uid => {
-      const opt = document.createElement('option');
-      opt.value       = uid;
-      opt.textContent = `User ${uid}`;
-      sel.appendChild(opt);
+      const o = document.createElement('option');
+      o.value = uid; o.textContent = `User ${uid}`;
+      sel.appendChild(o);
     });
   } catch (_) {}
 }
 
-// -----------------------------------------------------------------------
-// Demo — get recommendations
-// -----------------------------------------------------------------------
 async function getRecommendations() {
   const uid = document.getElementById('user-select').value;
   if (!uid) { alert('Please select a user first.'); return; }
 
-  const k   = document.getElementById('k-select').value;
-  const btn = document.getElementById('rec-btn');
-  const err = document.getElementById('rec-error');
+  const k    = document.getElementById('k-select').value;
+  const hour = document.getElementById('hour-select').value;
+  const dow  = document.getElementById('dow-select').value;
+  const btn  = document.getElementById('rec-btn');
+  const err  = document.getElementById('rec-error');
 
-  btn.disabled    = true;
-  btn.textContent = 'Loading…';
+  btn.disabled = true; btn.textContent = 'Loading…';
   err.style.display = 'none';
 
+  let url = `/api/recommend/${uid}?k=${k}`;
+  if (hour !== '') url += `&hour=${hour}`;
+  if (dow  !== '') url += `&dow=${dow}`;
+
   try {
-    const res  = await fetch(`/api/recommend/${uid}?k=${k}`);
+    const res  = await fetch(url);
     const data = await res.json();
 
     if (data.error) {
-      err.textContent   = data.error;
-      err.style.display = 'block';
-      return;
+      err.textContent = data.error; err.style.display = 'block'; return;
     }
+
+    renderUserProfile(data.profile);
     renderHistory(data.history);
-    renderRecommendations(data.recommendations, data.epsilon);
+    renderAdFeed(data.recommendations, data.epsilon);
 
   } catch (e) {
-    err.textContent   = 'Request failed: ' + e.message;
-    err.style.display = 'block';
+    err.textContent = 'Request failed: ' + e.message; err.style.display = 'block';
   } finally {
-    btn.disabled    = false;
-    btn.textContent = 'Get Recommendations';
+    btn.disabled = false; btn.textContent = '📡 Serve Ads';
   }
+}
+
+function renderUserProfile(profile) {
+  if (!profile || !profile.user_id && profile.user_id !== 0) return;
+  const box = document.getElementById('user-profile-box');
+  box.style.display = 'block';
+  setText('prof-age',    profile.age_group || '—');
+  setText('prof-gender', profile.gender    || '—');
+  setText('prof-device', profile.device    || '—');
+  const ints = document.getElementById('prof-interests');
+  ints.innerHTML = (profile.interests || [])
+    .map(i => `<span class="badge badge-interest">${escHtml(i)}</span>`)
+    .join(' ');
 }
 
 function renderHistory(history) {
   const el  = document.getElementById('history-list');
   const cnt = document.getElementById('history-count');
-
-  if (!history || history.length === 0) {
-    el.innerHTML  = '<div class="empty-state">No history available for this user.</div>';
-    cnt.textContent = '';
-    return;
+  if (!history || !history.length) {
+    el.innerHTML = '<div class="empty-state">No impression history found.</div>';
+    cnt.textContent = ''; return;
   }
-
-  cnt.textContent = `${history.length} interactions`;
+  cnt.textContent = `${history.length} impressions`;
   el.className    = 'item-list';
-  el.innerHTML    = history.map(item => `
-    <div class="item-row">
-      <div>
-        <div class="item-title">${escHtml(item.title)}</div>
-        <div class="item-genres">${genreBadges(item.genres)}</div>
-      </div>
-      <span class="${item.liked ? 'liked-yes' : 'liked-no'}">${item.liked ? '👍' : '👎'}</span>
-    </div>
-  `).join('');
+  el.innerHTML    = history.map(item => {
+    const outcome = item.converted ? '💰' : item.clicked ? '👆' : '👁';
+    const cls     = item.converted ? 'outcome-convert' : item.clicked ? 'outcome-click' : 'outcome-skip';
+    return `
+      <div class="history-row">
+        <div>
+          <div style="font-weight:500">${escHtml(item.headline)}</div>
+          <div class="history-meta">
+            ${escHtml(item.advertiser)} &nbsp;·&nbsp;
+            <span class="badge badge-cat">${escHtml(item.category)}</span>
+            <span class="badge badge-fmt" style="margin-left:4px">${escHtml(item.format)}</span>
+          </div>
+        </div>
+        <span class="${cls}" title="${item.converted ? 'Converted' : item.clicked ? 'Clicked' : 'Skipped'}">${outcome}</span>
+      </div>`;
+  }).join('');
 }
 
-function renderRecommendations(recs, epsilon) {
+function renderAdFeed(recs, epsilon) {
   const el   = document.getElementById('rec-list');
   const cnt  = document.getElementById('rec-count');
   const info = document.getElementById('rec-info');
 
-  if (!recs || recs.length === 0) {
-    el.innerHTML    = '<div class="empty-state">No recommendations returned.</div>';
-    cnt.textContent = '';
-    info.style.display = 'none';
-    return;
+  if (!recs || !recs.length) {
+    el.innerHTML = '<div class="empty-state">No ads returned.</div>';
+    cnt.textContent = ''; info.style.display = 'none'; return;
   }
 
-  cnt.textContent    = `${recs.length} items`;
+  cnt.textContent    = `${recs.length} ads`;
   info.style.display = 'block';
-  info.textContent   = `ε = ${epsilon}  (exploration rate — lower means more confident policy)`;
+  info.textContent   = `ε = ${epsilon} (exploration rate)  ·  Ranked by DQN Q-score  ·  CTR/CVR from neural predictor`;
 
-  el.className = 'rec-grid';
-  el.innerHTML = recs.map((item, i) => `
-    <div class="rec-card">
-      <div class="rec-rank">#${i + 1}</div>
-      <div class="rec-title">${escHtml(item.title)}</div>
-      <div>${genreBadges(item.genres)}</div>
-      <div class="rec-score">Q-score: ${item.score}</div>
+  el.className = 'ad-grid';
+  el.innerHTML = recs.map((ad, i) => `
+    <div class="ad-card">
+      <div class="ad-rank">#${i+1} &nbsp;<span class="badge badge-fmt">${escHtml(ad.format)}</span></div>
+      <div class="ad-headline">${escHtml(ad.headline)}</div>
+      <div class="ad-advertiser">${escHtml(ad.advertiser)}</div>
+      <div>${catBadge(ad.category)}</div>
+      <div class="ad-metrics">
+        <div class="ad-metric">CTR <span class="ctr-val">${pct(ad.p_click)}</span></div>
+        <div class="ad-metric">CVR <span class="cvr-val">${pct(ad.p_convert)}</span></div>
+        <div class="ad-metric">Bid <span class="val">$${ad.bid_price.toFixed(2)}</span></div>
+        <div class="ad-metric">Q <span class="val">${ad.q_score}</span></div>
+      </div>
     </div>
   `).join('');
+}
+
+// -----------------------------------------------------------------------
+// Analytics
+// -----------------------------------------------------------------------
+async function loadAnalytics() {
+  if (analyticsLoaded) return;
+  try {
+    const res  = await fetch('/api/analytics');
+    const data = await res.json();
+
+    // KPI cards
+    const kpiEl = document.getElementById('analytics-kpis');
+    kpiEl.className = 'kpi-grid wide';
+    kpiEl.innerHTML = [
+      ['Impressions', fmtNum(data.total_impressions)],
+      ['Clicks',      fmtNum(data.total_clicks)],
+      ['Conversions', fmtNum(data.total_conversions)],
+      ['CTR',         pct(data.ctr)],
+      ['CVR',         pct(data.cvr)],
+      ['eCPM',        '$' + (data.ecpm || 0).toFixed(3)],
+      ['Revenue',     '$' + (data.total_revenue || 0).toFixed(2)],
+    ].map(([lbl, val]) => `
+      <div class="kpi-card">
+        <div class="kpi-val">${val}</div>
+        <div class="kpi-lbl">${lbl}</div>
+      </div>
+    `).join('');
+
+    // Category table
+    const catWrap = document.getElementById('category-table-wrap');
+    if (data.by_category && data.by_category.length) {
+      const maxImp = Math.max(...data.by_category.map(r => r.impressions));
+      catWrap.innerHTML = `
+        <table class="data-table">
+          <thead><tr>
+            <th>Category</th><th>Impressions</th><th>Clicks</th>
+            <th>CTR</th><th>Conversions</th><th>Revenue</th>
+          </tr></thead>
+          <tbody>
+            ${data.by_category.sort((a,b) => b.ctr - a.ctr).map(r => `
+              <tr>
+                <td>${catBadge(r.category)}</td>
+                <td>
+                  <div class="bar-cell">
+                    ${fmtNum(r.impressions)}
+                    <div class="bar-bg"><div class="bar-fill" style="width:${(r.impressions/maxImp*100).toFixed(1)}%"></div></div>
+                  </div>
+                </td>
+                <td>${fmtNum(r.clicks)}</td>
+                <td style="color:var(--green)">${pct(r.ctr)}</td>
+                <td>${fmtNum(r.conversions)}</td>
+                <td>$${r.revenue.toFixed(2)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>`;
+    }
+
+    // CTR bar chart
+    buildCTRChart(data.by_category || []);
+
+    // Metrics (if available)
+    await loadMetrics();
+    analyticsLoaded = true;
+
+  } catch (_) {}
+}
+
+function buildCTRChart(cats) {
+  const ctx = document.getElementById('ctr-chart').getContext('2d');
+  if (ctrChart) ctrChart.destroy();
+  ctrChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: cats.map(r => r.category),
+      datasets: [{
+        label: 'CTR',
+        data:  cats.map(r => +(r.ctr * 100).toFixed(2)),
+        backgroundColor: 'rgba(124,109,250,.7)',
+        borderColor: '#7c6dfa', borderWidth: 1, borderRadius: 4,
+      }],
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { labels: { color: '#7878a0' } },
+        tooltip: { callbacks: { label: ctx => ctx.parsed.y.toFixed(2) + '%' } },
+      },
+      scales: {
+        x: { ticks: { color: '#7878a0' }, grid: { color: '#2a2a4a' } },
+        y: {
+          ticks: { color: '#7878a0', callback: v => v + '%' },
+          grid: { color: '#2a2a4a' },
+        },
+      },
+    },
+  });
+}
+
+async function loadMetrics() {
+  try {
+    const res  = await fetch('/api/metrics');
+    const data = await res.json();
+    if (!data.message) renderMetrics(data);
+  } catch (_) {}
+}
+
+function renderMetrics(metrics) {
+  const el = document.getElementById('metrics-grid');
+  if (!el) return;
+  const entries = Object.entries(metrics);
+  if (!entries.length) return;
+
+  el.className = 'metrics-grid';
+
+  // Format category labels
+  const formatLabel = k => {
+    const special = { CTR: 'CTR', CVR: 'CVR', eCPM: 'eCPM ($)', Coverage: 'Coverage' };
+    return special[k] || k;
+  };
+  const formatVal = (k, v) => {
+    if (k === 'eCPM') return '$' + v.toFixed(3);
+    return (v * 100).toFixed(1) + '%';
+  };
+
+  el.innerHTML = entries.map(([k, v]) => {
+    const cls = v >= 0.25 ? 'good' : v >= 0.08 ? 'mid' : 'low';
+    return `
+      <div class="metric-card">
+        <div class="metric-name">${formatLabel(k)}</div>
+        <div class="metric-val ${cls}">${formatVal(k, v)}</div>
+      </div>`;
+  }).join('');
+}
+
+// -----------------------------------------------------------------------
+// Advertisers
+// -----------------------------------------------------------------------
+async function loadAdvertisers() {
+  try {
+    const res  = await fetch('/api/advertisers');
+    const data = await res.json();
+    const advs = data.advertisers || [];
+
+    const wrap = document.getElementById('advertiser-table-wrap');
+    if (!advs.length) { wrap.innerHTML = '<div class="empty-state">No data yet.</div>'; return; }
+
+    const maxROAS = Math.max(...advs.map(a => a.roas));
+    wrap.innerHTML = `
+      <table class="data-table">
+        <thead><tr>
+          <th>Advertiser</th><th>Impressions</th><th>Clicks</th>
+          <th>CTR</th><th>Conversions</th><th>Spend ($)</th><th>ROAS</th>
+        </tr></thead>
+        <tbody>
+          ${advs.sort((a,b) => b.roas - a.roas).map(a => `
+            <tr>
+              <td style="font-weight:500;color:var(--text)">${escHtml(a.advertiser)}</td>
+              <td>${fmtNum(a.impressions)}</td>
+              <td>${fmtNum(a.clicks)}</td>
+              <td style="color:var(--green)">${pct(a.ctr)}</td>
+              <td>${fmtNum(a.conversions)}</td>
+              <td>$${a.spend.toFixed(2)}</td>
+              <td>
+                <div class="bar-cell">
+                  <span style="color:var(--orange);font-weight:600">${a.roas.toFixed(1)}x</span>
+                  <div class="bar-bg"><div class="bar-fill" style="width:${(a.roas/maxROAS*100).toFixed(1)}%"></div></div>
+                </div>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>`;
+
+    buildROASChart(advs);
+
+  } catch (_) {}
+}
+
+function buildROASChart(advs) {
+  const ctx = document.getElementById('roas-chart').getContext('2d');
+  if (roasChart) roasChart.destroy();
+  const sorted = [...advs].sort((a,b) => b.roas - a.roas);
+  roasChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: sorted.map(a => a.advertiser),
+      datasets: [{
+        label: 'ROAS (x)',
+        data:  sorted.map(a => a.roas),
+        backgroundColor: sorted.map((_, i) =>
+          `hsla(${200 + i * 15}, 80%, 60%, 0.75)`
+        ),
+        borderRadius: 4,
+      }],
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { labels: { color: '#7878a0' } },
+        tooltip: { callbacks: { label: ctx => ctx.parsed.y.toFixed(2) + 'x ROAS' } },
+      },
+      scales: {
+        x: { ticks: { color: '#7878a0' }, grid: { color: '#2a2a4a' } },
+        y: {
+          ticks: { color: '#7878a0', callback: v => v + 'x' },
+          grid: { color: '#2a2a4a' },
+        },
+      },
+    },
+  });
 }
 
 // -----------------------------------------------------------------------
@@ -256,44 +486,14 @@ async function retrain() {
     });
     const data = await res.json();
     if (res.ok) {
-      // resume polling
       clearInterval(pollTimer);
       pollTimer = setInterval(pollStatus, 2500);
+      analyticsLoaded = false;
       alert(`Training started for ${epochs} epoch(s).`);
     } else {
       alert(data.message || 'Could not start training.');
     }
-  } catch (e) {
-    alert('Error: ' + e.message);
-  }
-}
-
-// -----------------------------------------------------------------------
-// Metrics
-// -----------------------------------------------------------------------
-async function loadMetrics() {
-  try {
-    const res  = await fetch('/api/metrics');
-    const data = await res.json();
-    if (!data.message) renderMetrics(data);
-  } catch (_) {}
-}
-
-function renderMetrics(metrics) {
-  const el      = document.getElementById('metrics-grid');
-  const entries = Object.entries(metrics);
-  if (!entries.length) return;
-
-  el.className = 'metrics-grid';
-  el.innerHTML = entries.map(([name, val]) => {
-    const cls = val >= 0.3 ? 'good' : val >= 0.1 ? 'mid' : 'low';
-    return `
-      <div class="metric-card">
-        <div class="metric-name">${name}</div>
-        <div class="metric-val ${cls}">${(val * 100).toFixed(1)}%</div>
-      </div>
-    `;
-  }).join('');
+  } catch (e) { alert('Error: ' + e.message); }
 }
 
 // -----------------------------------------------------------------------
@@ -303,27 +503,16 @@ function setText(id, text) {
   const el = document.getElementById(id);
   if (el) el.textContent = text;
 }
-
 function setBadge(el, text, cls) {
   if (!el) return;
-  el.textContent = text;
-  el.className   = 'badge ' + cls;
+  el.textContent = text; el.className = 'badge ' + cls;
 }
-
-function fmtNum(n) {
-  return n != null ? Number(n).toLocaleString() : '—';
+function fmtNum(n) { return n != null ? Number(n).toLocaleString() : '—'; }
+function pct(v)    { return v != null ? (v * 100).toFixed(2) + '%' : '—'; }
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
-
-function escHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
-function genreBadges(genres) {
-  if (!genres) return '';
-  return genres.split('|')
-    .map(g => `<span class="genre-badge">${escHtml(g.trim())}</span>`)
-    .join('');
+function catBadge(cat) {
+  return `<span class="badge badge-cat">${escHtml(cat || '—')}</span>`;
 }

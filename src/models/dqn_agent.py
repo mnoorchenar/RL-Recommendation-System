@@ -1,16 +1,21 @@
 """
-DQN agent for sequential recommendation.
+DQN agent for ad recommendation.
 
-State  = GRU encoding of the user's recent interaction history.
-Action = item index to recommend (catalogue of n_items).
-Reward = 1 if the user liked the item (rating ≥ 4), else 0.
+State  : 52-dim vector from AdStateEncoder (GRU history + user features + context)
+Action : ad_id  ∈ {0 … n_ads − 1}
+Reward : composite  =  R_CLICK·click + R_CONVERT·convert
+                      − R_FATIGUE·fatigue_count + R_REVENUE·bid_price
+
+The target network (Polyak / hard-copy update) provides stable TD targets.
+Smooth-L1 (Huber) loss is used for robustness to reward-scale variation.
 """
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from .state_encoder import StateEncoder
+from .state_encoder import AdStateEncoder
+from .ctr_model import CTRModel
 from ..data.replay_buffer import ReplayBuffer
 
 
@@ -27,74 +32,96 @@ class QNetwork(nn.Module):
         return self.net(x)
 
 
-class DQNAgent:
+class AdDQNAgent:
+    STATE_DIM = AdStateEncoder.OUTPUT_DIM  # 52
+
     def __init__(
         self,
-        n_items: int,
-        embed_dim: int = 32,
-        hidden_dim: int = 64,
-        lr: float = 1e-3,
-        gamma: float = 0.99,
-        epsilon: float = 1.0,
-        epsilon_min: float = 0.05,
-        epsilon_decay: float = 0.995,
-        buffer_capacity: int = 50_000,
-        batch_size: int = 64,
-        target_update: int = 200,
+        n_ads:            int,
+        user_feat_dim:    int   = 21,
+        lr:               float = 1e-3,
+        gamma:            float = 0.99,
+        epsilon:          float = 1.0,
+        epsilon_min:      float = 0.05,
+        epsilon_decay:    float = 0.995,
+        buffer_capacity:  int   = 30_000,
+        batch_size:       int   = 64,
+        target_update:    int   = 200,
     ):
-        self.n_items = n_items
-        self.gamma = gamma
-        self.epsilon = epsilon
-        self.epsilon_min = epsilon_min
+        self.n_ads         = n_ads
+        self.gamma         = gamma
+        self.epsilon       = epsilon
+        self.epsilon_min   = epsilon_min
         self.epsilon_decay = epsilon_decay
-        self.batch_size = batch_size
+        self.batch_size    = batch_size
         self.target_update = target_update
-        self.steps = 0
+        self.steps         = 0
 
-        self.encoder = StateEncoder(n_items, embed_dim, hidden_dim)
-        state_dim = hidden_dim
-
-        self.q_net     = QNetwork(state_dim, n_items)
-        self.target_net = QNetwork(state_dim, n_items)
+        # Networks
+        self.encoder    = AdStateEncoder(n_ads, user_feat_dim)
+        self.q_net      = QNetwork(self.STATE_DIM, n_ads)
+        self.target_net = QNetwork(self.STATE_DIM, n_ads)
         self.target_net.load_state_dict(self.q_net.state_dict())
         self.target_net.eval()
 
-        params = list(self.encoder.parameters()) + list(self.q_net.parameters())
+        self.ctr_model  = CTRModel(self.STATE_DIM, n_ads)
+
+        params = (list(self.encoder.parameters())
+                  + list(self.q_net.parameters())
+                  + list(self.ctr_model.parameters()))
         self.optimizer = optim.Adam(params, lr=lr)
 
         self.buffer = ReplayBuffer(buffer_capacity)
         self.losses: list = []
 
     # ------------------------------------------------------------------
-    # State / inference helpers
+    # Inference
     # ------------------------------------------------------------------
 
-    def get_state(self, history: list, max_len: int = 10) -> torch.Tensor:
-        """Return (1, hidden_dim) state tensor for a user history."""
-        return self.encoder.encode(history, max_len)
+    def get_state(self, history: list, user_feat, ctx_feat) -> torch.Tensor:
+        return self.encoder.encode(history, user_feat, ctx_feat)  # (1, 52)
 
     def get_top_k_recommendations(
-        self, history: list, k: int = 10, exclude_seen: bool = True
+        self,
+        history:       list,
+        user_feat,
+        ctx_feat,
+        k:             int  = 10,
+        exclude_seen:  bool = False,
     ) -> list:
-        """Return [(item_id, q_score), ...] sorted by Q-value descending."""
-        state = self.get_state(history)
-        seen = {item_id for item_id, _ in history} if exclude_seen else set()
-        available = [i for i in range(self.n_items) if i not in seen]
+        """
+        Returns list of dicts:
+          {ad_id, q_score, p_click, p_convert}
+        sorted by q_score descending.
+        """
+        state = self.get_state(history, user_feat, ctx_feat)
+        seen  = {ad_id for ad_id, *_ in history} if exclude_seen else set()
+        avail = [i for i in range(self.n_ads) if i not in seen]
+
         with torch.no_grad():
             q = self.q_net(state)[0].numpy()
-        ranked = sorted([(i, float(q[i])) for i in available], key=lambda x: x[1], reverse=True)
-        return ranked[:k]
+
+        ranked     = sorted(avail, key=lambda i: q[i], reverse=True)[:k]
+        ctr_preds  = self.ctr_model.predict(state, ranked)
+
+        return [
+            {
+                'ad_id':     int(ad_id),
+                'q_score':   round(float(q[ad_id]), 4),
+                'p_click':   round(ctr_preds[i][0], 4),
+                'p_convert': round(ctr_preds[i][1], 4),
+            }
+            for i, ad_id in enumerate(ranked)
+        ]
 
     # ------------------------------------------------------------------
     # Training
     # ------------------------------------------------------------------
 
-    def store(self, state: torch.Tensor, action: int, reward: float,
-              next_state: torch.Tensor, done: bool):
+    def store(self, state, action, reward, next_state, done):
         self.buffer.push(
             state.numpy().flatten(),
-            action,
-            reward,
+            action, reward,
             next_state.numpy().flatten(),
             done,
         )
@@ -104,17 +131,16 @@ class DQNAgent:
             return None
 
         states, actions, rewards, next_states, dones = self.buffer.sample(self.batch_size)
+        S  = torch.FloatTensor(states)
+        A  = torch.LongTensor(actions)
+        R  = torch.FloatTensor(rewards)
+        S_ = torch.FloatTensor(next_states)
+        D  = torch.FloatTensor(dones)
 
-        states      = torch.FloatTensor(states)
-        actions     = torch.LongTensor(actions)
-        rewards     = torch.FloatTensor(rewards)
-        next_states = torch.FloatTensor(next_states)
-        dones       = torch.FloatTensor(dones)
-
-        current_q = self.q_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+        current_q = self.q_net(S).gather(1, A.unsqueeze(1)).squeeze(1)
         with torch.no_grad():
-            next_q   = self.target_net(next_states).max(1)[0]
-            target_q = rewards + self.gamma * next_q * (1 - dones)
+            next_q   = self.target_net(S_).max(1)[0]
+            target_q = R + self.gamma * next_q * (1 - D)
 
         loss = nn.functional.smooth_l1_loss(current_q, target_q)
         self.optimizer.zero_grad()
@@ -125,13 +151,13 @@ class DQNAgent:
         self.optimizer.step()
 
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
-        self.steps += 1
+        self.steps  += 1
         if self.steps % self.target_update == 0:
             self.target_net.load_state_dict(self.q_net.state_dict())
 
-        loss_val = loss.item()
-        self.losses.append(loss_val)
-        return loss_val
+        lv = loss.item()
+        self.losses.append(lv)
+        return lv
 
     # ------------------------------------------------------------------
     # Persistence
@@ -142,6 +168,7 @@ class DQNAgent:
             'encoder':    self.encoder.state_dict(),
             'q_net':      self.q_net.state_dict(),
             'target_net': self.target_net.state_dict(),
+            'ctr_model':  self.ctr_model.state_dict(),
             'epsilon':    self.epsilon,
             'steps':      self.steps,
         }, path)
@@ -151,5 +178,6 @@ class DQNAgent:
         self.encoder.load_state_dict(ck['encoder'])
         self.q_net.load_state_dict(ck['q_net'])
         self.target_net.load_state_dict(ck['target_net'])
+        self.ctr_model.load_state_dict(ck['ctr_model'])
         self.epsilon = ck['epsilon']
         self.steps   = ck['steps']
