@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RL Recommendation System</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════ HEADER ═══════════════════════════ -->
+<header>
+  <div class="header-left">
+    <div class="logo">⚡</div>
+    <div>
+      <h1>RL Recommendation System</h1>
+      <p class="subtitle">Deep Q-Network · GRU State Encoder · Offline RL · MovieLens-style Data</p>
+    </div>
+  </div>
+  <div id="status-badge" class="badge badge-pending">Initialising…</div>
+</header>
+
+<!-- ═══════════════════════════ TABS ════════════════════════════ -->
+<nav class="tabs">
+  <button class="tab active" data-tab="overview">Overview</button>
+  <button class="tab"        data-tab="demo">Demo</button>
+  <button class="tab"        data-tab="training">Training</button>
+  <button class="tab"        data-tab="metrics">Metrics</button>
+</nav>
+
+<main>
+
+  <!-- ──────────────────── OVERVIEW ──────────────────── -->
+  <section id="tab-overview" class="tab-content active">
+
+    <div class="grid-2">
+      <div class="card">
+        <h2>About this System</h2>
+        <p>
+          This project implements a <strong>Deep Q-Network (DQN)</strong> recommender agent
+          trained via <strong>offline reinforcement learning</strong> on synthetic
+          MovieLens-style interaction data. The agent learns to predict which item will
+          maximise long-term user satisfaction, not just immediate clicks.
+        </p>
+        <ul class="feature-list">
+          <li>🧠 <strong>GRU State Encoder</strong> — encodes interaction history into a dense state vector</li>
+          <li>🎯 <strong>DQN Policy</strong> — Q-network selects the highest-value item to recommend</li>
+          <li>🔄 <strong>Experience Replay</strong> — 30K-transition buffer stabilises TD learning</li>
+          <li>📊 <strong>Offline Training</strong> — learns from historical ratings (no live exploration needed)</li>
+          <li>📈 <strong>OPE Evaluation</strong> — Precision@K, Recall@K, NDCG@K, Hit-Rate@K</li>
+          <li>🎰 <strong>LinUCB Bandit</strong> — simpler contextual bandit baseline included</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h2>Dataset Stats</h2>
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-val" id="stat-users">—</div>
+            <div class="stat-lbl">Users</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-val" id="stat-items">—</div>
+            <div class="stat-lbl">Items</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-val" id="stat-train">—</div>
+            <div class="stat-lbl">Train Interactions</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-val" id="stat-test">—</div>
+            <div class="stat-lbl">Test Interactions</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Architecture</h2>
+      <pre class="arch-diagram">
+  User Interaction History  [(item_id, reward), (item_id, reward), …]
+              │
+              ▼
+  ┌─────────────────────────┐
+  │  Item Embedding Layer   │  embed_dim = 16   (item index → dense vector)
+  │  Reward Embedding Layer │  dim = 4          (0=skip, 1=liked)
+  └───────────┬─────────────┘
+              │  concat → input dim = 20
+              ▼
+  ┌─────────────────────────┐
+  │     GRU Encoder         │  hidden_dim = 32, processes last 10 interactions
+  └───────────┬─────────────┘
+              │  state vector s ∈ ℝ³²
+              ▼
+  ┌─────────────────────────┐
+  │     Q-Network (MLP)     │  Linear(32→128) → ReLU → Linear(128→128) → ReLU
+  │                         │  → Linear(128→n_items)
+  └───────────┬─────────────┘
+              │  Q(s, a)  for all a ∈ {0 … n_items−1}
+              ▼
+         argmax_a Q(s, a)  →  Top-K Recommended Items
+              │
+              ▼
+  ┌─────────────────────────┐
+  │    Experience Replay    │  stores (s, a, r, s′, done) tuples
+  └───────────┬─────────────┘
+              │
+              ▼
+  TD Loss:  L = E[(r + γ · max_a′ Q̂(s′,a′) − Q(s,a))²]
+      </pre>
+    </div>
+
+    <div class="card">
+      <h2>RL Formulation</h2>
+      <div class="grid-3">
+        <div class="info-card">
+          <div class="info-icon">🤖</div>
+          <h3>Agent</h3>
+          <p>The DQN recommender that selects which item to suggest next</p>
+        </div>
+        <div class="info-card">
+          <div class="info-icon">🌍</div>
+          <h3>Environment</h3>
+          <p>The user — their responses (likes / skips) form the reward signal</p>
+        </div>
+        <div class="info-card">
+          <div class="info-icon">📋</div>
+          <h3>State</h3>
+          <p>GRU encoding of the last 10 user interactions (item + reward pairs)</p>
+        </div>
+        <div class="info-card">
+          <div class="info-icon">🎬</div>
+          <h3>Action</h3>
+          <p>Which item to recommend from the 200-item catalog</p>
+        </div>
+        <div class="info-card">
+          <div class="info-icon">⭐</div>
+          <h3>Reward</h3>
+          <p>+1 if user rating ≥ 4 (liked), 0 otherwise (skip / dislike)</p>
+        </div>
+        <div class="info-card">
+          <div class="info-icon">🔮</div>
+          <h3>Policy</h3>
+          <p>ε-greedy during offline training; greedy argmax Q at inference</p>
+        </div>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ──────────────────── DEMO ──────────────────── -->
+  <section id="tab-demo" class="tab-content">
+
+    <div class="grid-2">
+      <div class="card">
+        <h2>Get Recommendations</h2>
+
+        <div class="form-row">
+          <label for="user-select">Select User</label>
+          <select id="user-select"><option value="">Loading users…</option></select>
+        </div>
+
+        <div class="form-row">
+          <label for="k-select">Top-K</label>
+          <select id="k-select">
+            <option value="5">5</option>
+            <option value="10" selected>10</option>
+            <option value="20">20</option>
+          </select>
+        </div>
+
+        <button id="rec-btn" class="btn btn-primary" onclick="getRecommendations()">
+          Get Recommendations
+        </button>
+        <div id="rec-error" class="error-msg" style="display:none"></div>
+      </div>
+
+      <div class="card">
+        <h2>
+          User History
+          <span id="history-count" class="badge badge-info" style="margin-left:8px"></span>
+        </h2>
+        <div id="history-list" class="empty-state">
+          Select a user and click "Get Recommendations"
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>
+        Recommendations
+        <span id="rec-count" class="badge badge-info" style="margin-left:8px"></span>
+      </h2>
+      <div id="rec-info" class="rec-info-bar" style="display:none"></div>
+      <div id="rec-list" class="empty-state">
+        Recommendations will appear here after you click "Get Recommendations"
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ──────────────────── TRAINING ──────────────────── -->
+  <section id="tab-training" class="tab-content">
+
+    <div class="grid-2">
+      <div class="card">
+        <h2>Training Status</h2>
+
+        <div class="training-status">
+          <div class="status-row">
+            <span>Status</span>
+            <span id="train-status-text" class="badge badge-pending">Pending</span>
+          </div>
+          <div class="status-row">
+            <span>Epoch</span>
+            <span id="train-epoch">—</span>
+          </div>
+          <div class="status-row">
+            <span>Loss (Smooth L1)</span>
+            <span id="train-loss">—</span>
+          </div>
+          <div class="status-row">
+            <span>Epsilon (ε)</span>
+            <span id="train-epsilon">1.0</span>
+          </div>
+        </div>
+
+        <div class="progress-wrap">
+          <div class="progress-bar" id="progress-bar" style="width:0%"></div>
+        </div>
+        <p id="progress-label" class="progress-label">0%</p>
+
+        <div class="retrain-form">
+          <label for="epoch-input">Epochs:</label>
+          <input id="epoch-input" type="number" value="5" min="1" max="20" class="num-input">
+          <button class="btn btn-secondary" onclick="retrain()">↺ Retrain</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Loss Curve</h2>
+        <canvas id="loss-chart" height="230"></canvas>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ──────────────────── METRICS ──────────────────── -->
+  <section id="tab-metrics" class="tab-content">
+
+    <div class="card">
+      <h2>Evaluation Results</h2>
+      <p class="muted">
+        Evaluated on held-out test interactions (last 20% per user).
+        Items with rating ≥ 4 are considered relevant. Higher is better for all metrics.
+      </p>
+      <div id="metrics-grid" class="metrics-grid">
+        <div class="empty-state">Metrics will appear after training completes.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Metrics Reference</h2>
+      <table class="metrics-table">
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th>Formula</th>
+            <th>What it measures</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Precision@K</td>
+            <td># relevant in top-K ÷ K</td>
+            <td>Fraction of recommendations that are relevant</td>
+          </tr>
+          <tr>
+            <td>Recall@K</td>
+            <td># relevant in top-K ÷ total relevant</td>
+            <td>Fraction of all relevant items that were surfaced</td>
+          </tr>
+          <tr>
+            <td>NDCG@K</td>
+            <td>DCG@K ÷ IDCG@K</td>
+            <td>Ranking quality — penalises relevant items ranked lower</td>
+          </tr>
+          <tr>
+            <td>Hit Rate@K</td>
+            <td>1 if any relevant item in top-K, else 0</td>
+            <td>Probability of surfacing at least one good recommendation</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+  </section>
+
+</main>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
